@@ -10,7 +10,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     ports:
-      - "8000:8000"
+      - "18632:8000"
     volumes:
       - retailpulse_artifacts:/app/artifacts
     healthcheck:
@@ -28,7 +28,7 @@ services:
     environment:
       API_BASE_URL: http://backend:8000
     ports:
-      - "8501:8501"
+      - "18631:8501"
     depends_on:
       backend:
         condition: service_healthy

@@ -143,8 +143,8 @@ docker compose up --build
 
 Then open:
 
-- Frontend: <http://localhost:8501>
-- Backend docs: <http://localhost:8000/docs>
+- Frontend: <http://localhost:18631>
+- Backend docs: <http://localhost:18632/docs>
 
 The first backend start generates the dataset and trains the models. Later starts reuse the Docker volume artifacts.
 
@@ -186,7 +186,7 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Expose ports `8501` and `8000` directly, or place them behind a reverse proxy such as Nginx, Caddy, or Traefik. Keep the `retailpulse_artifacts` Docker volume to avoid retraining on every restart.
+Expose frontend port `18631` for the dashboard and, if needed, backend port `18632` for API docs. For a public website, point your reverse proxy such as Nginx, Caddy, or Traefik to `http://localhost:18631`. Keep the `retailpulse_artifacts` Docker volume to avoid retraining on every restart.
 
 ## Resume Bullet
 
