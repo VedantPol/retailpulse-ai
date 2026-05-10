@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+artifacts/**/*.csv
+artifacts/**/*.joblib
+artifacts/**/*.json
+

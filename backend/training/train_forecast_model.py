@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
+from sklearn.inspection import permutation_importance
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+
+FEATURE_COLUMNS = [
+    "lag_1",
+    "lag_7",
+    "lag_14",
+    "lag_28",
+    "rolling_mean_7",
+    "rolling_mean_14",
+    "rolling_std_7",
+    "day_of_week",
+    "month",
+    "weekend_flag",
+    "promotion_flag",
+    "holiday_flag",
+    "price",
+    "discount",
+    "store_id_encoded",
+    "product_id_encoded",
+    "category_encoded",
+    "inventory_level",
+]
+
+
+def _encode_categories(df: pd.DataFrame, mappings: dict[str, dict[str, int]] | None = None) -> tuple[pd.DataFrame, dict[str, dict[str, int]]]:
+    df = df.copy()
+    mappings = mappings or {}
+    for col in ["store_id", "product_id", "category"]:
+        if col not in mappings:
+            values = sorted(df[col].astype(str).unique())
+            mappings[col] = {value: idx for idx, value in enumerate(values)}
+        df[f"{col}_encoded"] = df[col].astype(str).map(mappings[col]).fillna(-1).astype(int)
+    return df, mappings
+
+
+def build_features(df: pd.DataFrame, mappings: dict[str, dict[str, int]] | None = None) -> tuple[pd.DataFrame, dict[str, dict[str, int]]]:
+    """Create tabular time-series features for supervised demand forecasting."""
+
+    frame = df.copy()
+    frame["date"] = pd.to_datetime(frame["date"])
+    frame = frame.sort_values(["store_id", "product_id", "date"])
+    frame["weekend_flag"] = (frame["day_of_week"] >= 5).astype(int)
+    grouped = frame.groupby(["store_id", "product_id"], group_keys=False)
+    for lag in [1, 7, 14, 28]:
+        frame[f"lag_{lag}"] = grouped["units_sold"].shift(lag)
+    shifted = grouped["units_sold"].shift(1)
+    frame["rolling_mean_7"] = shifted.groupby([frame["store_id"], frame["product_id"]]).rolling(7, min_periods=3).mean().reset_index(level=[0, 1], drop=True)
+    frame["rolling_mean_14"] = shifted.groupby([frame["store_id"], frame["product_id"]]).rolling(14, min_periods=5).mean().reset_index(level=[0, 1], drop=True)
+    frame["rolling_std_7"] = shifted.groupby([frame["store_id"], frame["product_id"]]).rolling(7, min_periods=3).std().reset_index(level=[0, 1], drop=True)
+    frame, mappings = _encode_categories(frame, mappings)
+    frame = frame.dropna(subset=FEATURE_COLUMNS + ["units_sold"]).reset_index(drop=True)
+    return frame, mappings
+
+
+def _build_model() -> tuple[Any, str]:
+    try:
+        from lightgbm import LGBMRegressor
+
+        return (
+            LGBMRegressor(
+                objective="regression",
+                n_estimators=260,
+                learning_rate=0.055,
+                num_leaves=48,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                random_state=42,
+                n_jobs=-1,
+                verbose=-1,
+            ),
+            "LightGBM",
+        )
+    except Exception:
+        return (
+            HistGradientBoostingRegressor(
+                max_iter=230,
+                learning_rate=0.06,
+                max_leaf_nodes=31,
+                random_state=42,
+                l2_regularization=0.05,
+            ),
+            "sklearn HistGradientBoostingRegressor",
+        )
+
+
+def _feature_importance(model: Any, x_val: pd.DataFrame, y_val: pd.Series) -> list[dict[str, float | str]]:
+    if hasattr(model, "feature_importances_"):
+        raw = np.asarray(model.feature_importances_, dtype=float)
+    else:
+        sample_size = min(4500, len(x_val))
+        sample_x = x_val.sample(sample_size, random_state=42)
+        sample_y = y_val.loc[sample_x.index]
+        raw = permutation_importance(model, sample_x, sample_y, n_repeats=4, random_state=42, n_jobs=-1).importances_mean
+    total = float(np.sum(np.abs(raw))) or 1.0
+    rows = [
+        {"feature": feature, "importance": round(float(abs(value) / total), 5)}
+        for feature, value in zip(FEATURE_COLUMNS, raw)
+    ]
+    return sorted(rows, key=lambda item: float(item["importance"]), reverse=True)
+
+
+def train_forecast_model(data_path: Path, model_dir: Path, metrics_dir: Path, reports_dir: Path) -> dict[str, Any]:
+    df = pd.read_csv(data_path, parse_dates=["date"])
+    features, mappings = build_features(df)
+    cutoff = features["date"].max() - pd.Timedelta(days=60)
+    train_df = features[features["date"] <= cutoff]
+    val_df = features[features["date"] > cutoff]
+    x_train, y_train = train_df[FEATURE_COLUMNS], train_df["units_sold"]
+    x_val, y_val = val_df[FEATURE_COLUMNS], val_df["units_sold"]
+
+    model, algorithm = _build_model()
+    model.fit(x_train, y_train)
+    val_pred = np.clip(model.predict(x_val), 0, None)
+    residuals = y_val.to_numpy() - val_pred
+    mae = mean_absolute_error(y_val, val_pred)
+    rmse = float(np.sqrt(mean_squared_error(y_val, val_pred)))
+    mape = np.mean(np.abs((y_val.to_numpy() - val_pred) / np.maximum(y_val.to_numpy(), 1))) * 100
+    r2 = r2_score(y_val, val_pred)
+    training_date = datetime.now(timezone.utc).isoformat()
+    version = f"retailpulse-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    importance = _feature_importance(model, x_val, y_val)
+
+    model_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    bundle = {
+        "model": model,
+        "algorithm": algorithm,
+        "feature_columns": FEATURE_COLUMNS,
+        "category_mappings": mappings,
+        "training_date": training_date,
+        "model_version": version,
+        "residual_std": float(np.std(residuals)),
+    }
+    joblib.dump(bundle, model_dir / "forecast_model.joblib")
+
+    metrics = {
+        "model_version": version,
+        "training_date": training_date,
+        "algorithm": algorithm,
+        "rows_used_for_training": int(len(train_df)),
+        "validation_rows": int(len(val_df)),
+        "mae": round(float(mae), 3),
+        "rmse": round(float(rmse), 3),
+        "mape": round(float(mape), 3),
+        "r2_score": round(float(r2), 4),
+        "residual_std": round(float(np.std(residuals)), 3),
+    }
+    with (metrics_dir / "model_metrics.json").open("w", encoding="utf-8") as file:
+        json.dump(metrics, file, indent=2)
+    with (metrics_dir / "feature_importance.json").open("w", encoding="utf-8") as file:
+        json.dump(importance, file, indent=2)
+
+    category_errors = (
+        val_df.assign(abs_error=np.abs(y_val.to_numpy() - val_pred), ape=np.abs(y_val.to_numpy() - val_pred) / np.maximum(y_val.to_numpy(), 1) * 100)
+        .groupby("category")
+        .agg(mae=("abs_error", "mean"), mape=("ape", "mean"), rows=("abs_error", "size"))
+        .reset_index()
+    )
+    category_errors[["mae", "mape"]] = category_errors[["mae", "mape"]].round(3)
+    category_errors.to_json(metrics_dir / "category_errors.json", orient="records", indent=2)
+
+    sample = val_df[["date", "store_id", "product_id", "product_name", "category", "units_sold"]].copy()
+    sample["prediction"] = np.round(val_pred, 2)
+    sample.tail(500).to_json(reports_dir / "sample_predictions.json", orient="records", date_format="iso", indent=2)
+    return metrics
+
+
+if __name__ == "__main__":
+    train_forecast_model(
+        data_path=Path("backend/artifacts/data/retail_sales.csv"),
+        model_dir=Path("backend/artifacts/models"),
+        metrics_dir=Path("backend/artifacts/metrics"),
+        reports_dir=Path("backend/artifacts/reports"),
+    )

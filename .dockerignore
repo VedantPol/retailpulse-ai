@@ -1,0 +1,15 @@
+**/__pycache__/
+**/.pytest_cache/
+**/.streamlit/
+**/.venv/
+**/venv/
+**/*.pyc
+.git/
+.env
+backend/artifacts/**/*.csv
+backend/artifacts/**/*.joblib
+backend/artifacts/**/*.json
+artifacts/**/*.csv
+artifacts/**/*.joblib
+artifacts/**/*.json
+
