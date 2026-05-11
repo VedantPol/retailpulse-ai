@@ -4,6 +4,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: retailpulse-backend
+    restart: unless-stopped
     environment:
       ARTIFACTS_DIR: /app/artifacts
       DATA_SEED: 42
@@ -25,6 +26,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: retailpulse-frontend
+    restart: unless-stopped
     environment:
       API_BASE_URL: http://backend:8000
     ports:
