@@ -98,13 +98,10 @@ class ForecastService:
         month = int(target_date.month)
         weekend = int(dow >= 5)
         category = str(latest["category"])
-        promo_rate = float(recent["promotion_flag"].mean())
-        promo_gap = int(round(1 / promo_rate)) if promo_rate > 0 else 0
-        future_promo = int(promo_gap >= 7 and target_date.dayofyear % promo_gap == 0)
-        promo_discount = float(recent.loc[recent["promotion_flag"] == 1, "discount"].mean()) if bool((recent["promotion_flag"] == 1).any()) else 0.16
-        discount = round(promo_discount if future_promo else 0.0, 2)
+        future_promo = 0
+        discount = 0.0
         base_price = float(recent["price"].median())
-        price = max(0.99, base_price * (1 - discount))
+        price = max(0.99, base_price)
         inventory_projection = max(0.0, float(latest["inventory_level"]) - float(np.sum(history[-7:]) if history else 0) * 0.1)
         return {
             "lag_1": lag(1),
