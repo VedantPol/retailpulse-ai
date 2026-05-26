@@ -161,14 +161,30 @@ with tabs[3]:
     show_table(anomaly_data["anomalies"], "No anomalies detected for this product and store.")
 
 with tabs[4]:
-    section_title("Model Performance", "Validation metrics, training metadata, feature importance, and category-level error profile.")
+    section_title("Model Performance", "Validation metrics, recursive forecast backtest, feature importance, and category-level error profile.")
     model_metrics = metrics_data["metrics"]
+    recursive_metrics = model_metrics.get("recursive_backtest", {})
+    cumulative_30 = recursive_metrics.get("recursive_30_day_cumulative", {})
+    daily_30 = recursive_metrics.get("recursive_30_day_daily", {})
+
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("MAE", model_metrics.get("mae", "n/a"))
     m2.metric("RMSE", model_metrics.get("rmse", "n/a"))
     m3.metric("MAPE", f"{model_metrics.get('mape', 0)}%")
-    m4.metric("R2 Score", model_metrics.get("r2_score", "n/a"))
-    m5.metric("Latency", f"{summary['prediction_latency_ms']} ms")
+    m4.metric("WAPE Accuracy", f"{model_metrics.get('forecast_accuracy', 0)}%")
+    m5.metric("R2 Score", model_metrics.get("r2_score", "n/a"))
+
+    r1, r2, r3, r4, r5 = st.columns(5)
+    r1.metric("30-day accuracy", f"{cumulative_30.get('forecast_accuracy', 0)}%")
+    r2.metric("30-day WAPE", f"{cumulative_30.get('wmape', 0)}%")
+    r3.metric("Portfolio accuracy", f"{cumulative_30.get('total_demand_accuracy', 0)}%")
+    r4.metric("Recursive daily WAPE", f"{daily_30.get('wmape', 0)}%")
+    r5.metric("Latency", f"{summary['prediction_latency_ms']} ms")
+
+    st.caption(
+        "One-step validation measures next-day rows with known lag history. "
+        "Recursive metrics replay the deployed multi-day forecast path and are better for inventory planning."
+    )
     st.caption(f"Model version: {model_metrics.get('model_version')} | Training date: {model_metrics.get('training_date')} | Rows used: {model_metrics.get('rows_used_for_training'):,}")
     section_title("Feature Importance")
     with st.container(border=True):

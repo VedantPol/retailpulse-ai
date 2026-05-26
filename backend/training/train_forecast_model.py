@@ -34,6 +34,26 @@ FEATURE_COLUMNS = [
     "inventory_level",
 ]
 
+FORECAST_BLEND_WEIGHT = 0.45
+
+
+def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.clip(np.asarray(y_pred, dtype=float), 0, None)
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    mape = np.mean(np.abs((y_true - y_pred) / np.maximum(y_true, 1))) * 100
+    wmape = np.sum(np.abs(y_true - y_pred)) / max(float(np.sum(np.abs(y_true))), 1.0) * 100
+    r2 = r2_score(y_true, y_pred)
+    return {
+        "mae": round(float(mae), 3),
+        "rmse": round(float(rmse), 3),
+        "mape": round(float(mape), 3),
+        "wmape": round(float(wmape), 3),
+        "forecast_accuracy": round(float(max(0.0, 100 - wmape)), 3),
+        "r2_score": round(float(r2), 4),
+    }
+
 
 def _encode_categories(df: pd.DataFrame, mappings: dict[str, dict[str, int]] | None = None) -> tuple[pd.DataFrame, dict[str, dict[str, int]]]:
     df = df.copy()
@@ -112,6 +132,105 @@ def _feature_importance(model: Any, x_val: pd.DataFrame, y_val: pd.Series) -> li
     return sorted(rows, key=lambda item: float(item["importance"]), reverse=True)
 
 
+def _recursive_feature_row(
+    group: pd.DataFrame,
+    history: list[float],
+    target_date: pd.Timestamp,
+    mappings: dict[str, dict[str, int]],
+) -> dict[str, float]:
+    latest = group.iloc[-1]
+    lag = lambda n: history[-n] if len(history) >= n else float(np.mean(history))
+    rolling_7 = np.array(history[-7:] if len(history) >= 7 else history, dtype=float)
+    rolling_14 = np.array(history[-14:] if len(history) >= 14 else history, dtype=float)
+    dow = int(target_date.dayofweek)
+    month = int(target_date.month)
+    weekend = int(dow >= 5)
+    category = str(latest["category"])
+    future_promo = int(weekend and category in {"Grocery", "Beverages", "Apparel"} and target_date.day % 3 == 0)
+    discount = 0.12 if future_promo else 0.0
+    price = max(0.99, float(latest["price"]) * (1 - discount))
+    inventory_projection = max(0.0, float(latest["inventory_level"]) - float(np.sum(history[-7:]) if history else 0) * 0.1)
+    return {
+        "lag_1": lag(1),
+        "lag_7": lag(7),
+        "lag_14": lag(14),
+        "lag_28": lag(28),
+        "rolling_mean_7": float(rolling_7.mean()),
+        "rolling_mean_14": float(rolling_14.mean()),
+        "rolling_std_7": float(rolling_7.std(ddof=0)),
+        "day_of_week": dow,
+        "month": month,
+        "weekend_flag": weekend,
+        "promotion_flag": future_promo,
+        "holiday_flag": int((target_date.month, target_date.day) in {(1, 1), (7, 4), (11, 25), (12, 24), (12, 25)}),
+        "price": price,
+        "discount": discount,
+        "store_id_encoded": int(mappings.get("store_id", {}).get(str(latest["store_id"]), -1)),
+        "product_id_encoded": int(mappings.get("product_id", {}).get(str(latest["product_id"]), -1)),
+        "category_encoded": int(mappings.get("category", {}).get(category, -1)),
+        "inventory_level": inventory_projection,
+    }
+
+
+def _recursive_backtest(
+    model: Any,
+    sales_df: pd.DataFrame,
+    cutoff: pd.Timestamp,
+    mappings: dict[str, dict[str, int]],
+    feature_columns: list[str],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    sales = sales_df.copy()
+    sales["date"] = pd.to_datetime(sales["date"])
+    sales = sales.sort_values(["store_id", "product_id", "date"])
+
+    for (store_id, product_id), group in sales.groupby(["store_id", "product_id"]):
+        train_group = group[group["date"] <= cutoff].reset_index(drop=True)
+        val_group = group[group["date"] > cutoff].reset_index(drop=True)
+        if train_group.empty or val_group.empty:
+            continue
+
+        history = train_group["units_sold"].astype(float).tolist()
+        for step, actual in enumerate(val_group.itertuples(index=False), start=1):
+            row = _recursive_feature_row(train_group, history, pd.Timestamp(actual.date), mappings)
+            model_prediction = max(0.0, float(model.predict(pd.DataFrame([row], columns=feature_columns))[0]))
+            rolling_prediction = float(np.mean(history[-14:] if len(history) >= 14 else history))
+            prediction = FORECAST_BLEND_WEIGHT * model_prediction + (1 - FORECAST_BLEND_WEIGHT) * rolling_prediction
+            history.append(prediction)
+            rows.append(
+                {
+                    "store_id": store_id,
+                    "product_id": product_id,
+                    "category": actual.category,
+                    "horizon": step,
+                    "actual": float(actual.units_sold),
+                    "prediction": prediction,
+                }
+            )
+
+    backtest = pd.DataFrame(rows)
+    first_30 = backtest[backtest["horizon"] <= 30]
+    grouped_30 = first_30.groupby(["store_id", "product_id", "category"]).agg(actual=("actual", "sum"), prediction=("prediction", "sum"))
+    cumulative_wmape = (
+        np.sum(np.abs(grouped_30["actual"].to_numpy() - grouped_30["prediction"].to_numpy()))
+        / max(float(np.sum(grouped_30["actual"].to_numpy())), 1.0)
+        * 100
+    )
+    total_error = abs(float(grouped_30["actual"].sum()) - float(grouped_30["prediction"].sum())) / max(float(grouped_30["actual"].sum()), 1.0) * 100
+
+    return {
+        "recursive_30_day_daily": _regression_metrics(first_30["actual"].to_numpy(), first_30["prediction"].to_numpy()),
+        "recursive_60_day_daily": _regression_metrics(backtest["actual"].to_numpy(), backtest["prediction"].to_numpy()),
+        "recursive_30_day_cumulative": {
+            "wmape": round(float(cumulative_wmape), 3),
+            "forecast_accuracy": round(float(max(0.0, 100 - cumulative_wmape)), 3),
+            "total_demand_error": round(float(total_error), 3),
+            "total_demand_accuracy": round(float(max(0.0, 100 - total_error)), 3),
+            "series_count": int(len(grouped_30)),
+        },
+    }
+
+
 def train_forecast_model(data_path: Path, model_dir: Path, metrics_dir: Path, reports_dir: Path) -> dict[str, Any]:
     df = pd.read_csv(data_path, parse_dates=["date"])
     features, mappings = build_features(df)
@@ -125,10 +244,8 @@ def train_forecast_model(data_path: Path, model_dir: Path, metrics_dir: Path, re
     model.fit(x_train, y_train)
     val_pred = np.clip(model.predict(x_val), 0, None)
     residuals = y_val.to_numpy() - val_pred
-    mae = mean_absolute_error(y_val, val_pred)
-    rmse = float(np.sqrt(mean_squared_error(y_val, val_pred)))
-    mape = np.mean(np.abs((y_val.to_numpy() - val_pred) / np.maximum(y_val.to_numpy(), 1))) * 100
-    r2 = r2_score(y_val, val_pred)
+    validation_metrics = _regression_metrics(y_val.to_numpy(), val_pred)
+    recursive_metrics = _recursive_backtest(model, df, cutoff, mappings, FEATURE_COLUMNS)
     training_date = datetime.now(timezone.utc).isoformat()
     version = f"retailpulse-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     importance = _feature_importance(model, x_val, y_val)
@@ -145,6 +262,7 @@ def train_forecast_model(data_path: Path, model_dir: Path, metrics_dir: Path, re
         "training_date": training_date,
         "model_version": version,
         "residual_std": float(np.std(residuals)),
+        "forecast_blend_weight": FORECAST_BLEND_WEIGHT,
     }
     joblib.dump(bundle, model_dir / "forecast_model.joblib")
 
@@ -154,11 +272,15 @@ def train_forecast_model(data_path: Path, model_dir: Path, metrics_dir: Path, re
         "algorithm": algorithm,
         "rows_used_for_training": int(len(train_df)),
         "validation_rows": int(len(val_df)),
-        "mae": round(float(mae), 3),
-        "rmse": round(float(rmse), 3),
-        "mape": round(float(mape), 3),
-        "r2_score": round(float(r2), 4),
+        "mae": validation_metrics["mae"],
+        "rmse": validation_metrics["rmse"],
+        "mape": validation_metrics["mape"],
+        "wmape": validation_metrics["wmape"],
+        "forecast_accuracy": validation_metrics["forecast_accuracy"],
+        "r2_score": validation_metrics["r2_score"],
         "residual_std": round(float(np.std(residuals)), 3),
+        "forecast_blend_weight": FORECAST_BLEND_WEIGHT,
+        "recursive_backtest": recursive_metrics,
     }
     with (metrics_dir / "model_metrics.json").open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)

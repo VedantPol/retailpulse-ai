@@ -38,6 +38,7 @@ class ForecastService:
         self.model = self.ctx.model_bundle["model"]
         self.feature_columns = self.ctx.model_bundle.get("feature_columns", FEATURE_COLUMNS)
         self.mappings = self.ctx.model_bundle.get("category_mappings", {})
+        self.forecast_blend_weight = float(self.ctx.model_bundle.get("forecast_blend_weight", self.ctx.metrics.get("forecast_blend_weight", 0.45)))
 
     def metadata(self) -> dict[str, Any]:
         products = (
@@ -117,7 +118,9 @@ class ForecastService:
             target_date = latest_date + timedelta(days=step)
             row = self._future_row(group, history, target_date)
             x = pd.DataFrame([row], columns=self.feature_columns)
-            prediction = max(0.0, float(self.model.predict(x)[0]))
+            model_prediction = max(0.0, float(self.model.predict(x)[0]))
+            rolling_prediction = float(np.mean(history[-14:] if len(history) >= 14 else history))
+            prediction = self.forecast_blend_weight * model_prediction + (1 - self.forecast_blend_weight) * rolling_prediction
             widening = 1 + step / max(horizon_days, 1) * 0.35
             lower = max(0.0, prediction - 1.35 * residual_std * widening)
             upper = prediction + 1.35 * residual_std * widening

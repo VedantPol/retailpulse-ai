@@ -188,6 +188,8 @@ docker compose up --build -d
 
 Expose frontend port `18631` for the dashboard and, if needed, backend port `18632` for API docs. For a public website, point your reverse proxy such as Nginx, Caddy, or Traefik to `http://localhost:18631`. Keep the `retailpulse_artifacts` Docker volume to avoid retraining on every restart.
 
+For redeploy, forced retraining, and health-check commands, see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Resume Bullet
 
 Built and deployed RetailPulse AI, an end-to-end ML platform for retail demand forecasting, anomaly detection, product recommendations, model explainability, and AI-assisted business insights using Python, LightGBM, scikit-learn, FastAPI, Streamlit, Docker, and MLflow-style experiment tracking.
