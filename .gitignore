@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .streamlit/
+.local-run/
 
 backend/artifacts/**/*.csv
 backend/artifacts/**/*.joblib

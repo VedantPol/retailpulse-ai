@@ -152,6 +152,8 @@ class ForecastService:
             "historical": historical.to_dict(orient="records"),
             "forecast": forecast_rows,
             "summary": {
+                "forecast_horizon_days": horizon_days,
+                "forecasted_demand": round(forecast_total, 1),
                 "forecasted_30_day_demand": round(forecast_total, 1),
                 "average_daily_demand": round(avg_daily, 1),
                 "stockout_risk": stockout_risk,

@@ -90,6 +90,7 @@ with st.spinner("Loading model outputs..."):
 
 summary = forecast_data["summary"]
 product = forecast_data["product"]
+horizon_days = int(summary.get("forecast_horizon_days", horizon))
 hero(product["product_name"], store_id, category, product_id, metadata.get("model_version", "model-ready"))
 
 tabs = st.tabs(["Overview", "Demand Forecast", "Recommendations", "Anomaly Detection", "Model Performance", "AI Analyst"])
@@ -98,7 +99,7 @@ with tabs[0]:
     section_title(f"{product['product_name']} in {store_id}", "Live commercial snapshot with forecast, stockout risk, and action signals.")
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        metric_card("30-day demand", f"{summary['forecasted_30_day_demand']:,.0f}", "Forecasted units")
+        metric_card(f"{horizon_days}-day demand", f"{summary.get('forecasted_demand', summary['forecasted_30_day_demand']):,.0f}", "Forecasted total units")
     with c2:
         metric_card("Avg daily", f"{summary['average_daily_demand']:,.1f}", "Expected units/day")
     with c3:
@@ -107,7 +108,7 @@ with tabs[0]:
         metric_card("Inventory", f"{summary['current_inventory']:,}", "Units on hand")
     with c5:
         metric_card("Reorder", f"{summary['recommended_reorder_quantity']:,}", "Suggested units")
-    section_title("Demand Pulse", "Historical sales, 30-day forecast, uncertainty range, and detected anomalies in one view.")
+    section_title("Demand Pulse", f"Historical daily sales, {horizon_days}-day daily forecast, estimated range, and detected anomalies in one view.")
     with st.container(border=True):
         st.plotly_chart(
             forecast_chart(forecast_data["historical"], forecast_data["forecast"], anomaly_data["anomalies"]),
