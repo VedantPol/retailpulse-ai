@@ -64,8 +64,33 @@ class ForecastService:
             raise ValueError(f"No sales history found for store={store_id}, product={product_id}")
         return group.sort_values("date").reset_index(drop=True)
 
+    @staticmethod
+    def _seasonal_prediction(group: pd.DataFrame, history: list[float], target_date: pd.Timestamp) -> float:
+        recent = group.tail(180)
+        dow = int(target_date.dayofweek)
+        same_dow = recent[recent["day_of_week"] == dow].tail(8)["units_sold"].astype(float)
+        dow_mean = float(same_dow.mean()) if len(same_dow) >= 3 else float(recent["units_sold"].tail(28).mean())
+        short_level = float(np.mean(history[-14:] if len(history) >= 14 else history))
+        long_level = float(recent["units_sold"].tail(90).mean())
+        trend = 0.0
+        if len(history) >= 28:
+            trend = float(np.mean(history[-7:]) - np.mean(history[-28:-21]))
+        return max(0.0, 0.55 * dow_mean + 0.35 * short_level + 0.10 * long_level + 0.08 * trend)
+
+    @staticmethod
+    def _local_uncertainty(group: pd.DataFrame, fallback_std: float) -> float:
+        recent = group.tail(120)["units_sold"].astype(float)
+        if recent.empty:
+            return fallback_std
+        recent_std = float(recent.std(ddof=0))
+        q25, q75 = recent.quantile([0.25, 0.75])
+        iqr_std = float((q75 - q25) / 1.349) if q75 > q25 else recent_std
+        local_std = max(0.75, min(fallback_std, max(iqr_std, recent_std * 0.85)))
+        return float(local_std)
+
     def _future_row(self, group: pd.DataFrame, history: list[float], target_date: pd.Timestamp) -> dict[str, float]:
         latest = group.iloc[-1]
+        recent = group.tail(90)
         lag = lambda n: history[-n] if len(history) >= n else float(np.mean(history))
         rolling_7 = np.array(history[-7:] if len(history) >= 7 else history, dtype=float)
         rolling_14 = np.array(history[-14:] if len(history) >= 14 else history, dtype=float)
@@ -73,9 +98,13 @@ class ForecastService:
         month = int(target_date.month)
         weekend = int(dow >= 5)
         category = str(latest["category"])
-        future_promo = int(weekend and category in {"Grocery", "Beverages", "Apparel"} and target_date.day % 3 == 0)
-        discount = 0.12 if future_promo else 0.0
-        price = max(0.99, float(latest["price"]) * (1 - discount))
+        promo_rate = float(recent["promotion_flag"].mean())
+        promo_gap = int(round(1 / promo_rate)) if promo_rate > 0 else 0
+        future_promo = int(promo_gap >= 7 and target_date.dayofyear % promo_gap == 0)
+        promo_discount = float(recent.loc[recent["promotion_flag"] == 1, "discount"].mean()) if bool((recent["promotion_flag"] == 1).any()) else 0.16
+        discount = round(promo_discount if future_promo else 0.0, 2)
+        base_price = float(recent["price"].median())
+        price = max(0.99, base_price * (1 - discount))
         inventory_projection = max(0.0, float(latest["inventory_level"]) - float(np.sum(history[-7:]) if history else 0) * 0.1)
         return {
             "lag_1": lag(1),
@@ -112,6 +141,7 @@ class ForecastService:
         history = group["units_sold"].astype(float).tolist()
         latest_date = pd.to_datetime(group["date"].max())
         residual_std = float(self.ctx.metrics.get("residual_std", self.ctx.model_bundle.get("residual_std", 3.0)))
+        uncertainty_std = self._local_uncertainty(group, residual_std)
 
         forecast_rows: list[dict[str, Any]] = []
         for step in range(1, horizon_days + 1):
@@ -119,11 +149,11 @@ class ForecastService:
             row = self._future_row(group, history, target_date)
             x = pd.DataFrame([row], columns=self.feature_columns)
             model_prediction = max(0.0, float(self.model.predict(x)[0]))
-            rolling_prediction = float(np.mean(history[-14:] if len(history) >= 14 else history))
-            prediction = self.forecast_blend_weight * model_prediction + (1 - self.forecast_blend_weight) * rolling_prediction
-            widening = 1 + step / max(horizon_days, 1) * 0.35
-            lower = max(0.0, prediction - 1.35 * residual_std * widening)
-            upper = prediction + 1.35 * residual_std * widening
+            seasonal_prediction = self._seasonal_prediction(group, history, target_date)
+            prediction = self.forecast_blend_weight * model_prediction + (1 - self.forecast_blend_weight) * seasonal_prediction
+            widening = 1 + step / max(horizon_days, 1) * 0.25
+            lower = max(0.0, prediction - 1.15 * uncertainty_std * widening)
+            upper = prediction + 1.15 * uncertainty_std * widening
             history.append(prediction)
             forecast_rows.append(
                 {

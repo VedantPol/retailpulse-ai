@@ -139,6 +139,7 @@ def _recursive_feature_row(
     mappings: dict[str, dict[str, int]],
 ) -> dict[str, float]:
     latest = group.iloc[-1]
+    recent = group.tail(90)
     lag = lambda n: history[-n] if len(history) >= n else float(np.mean(history))
     rolling_7 = np.array(history[-7:] if len(history) >= 7 else history, dtype=float)
     rolling_14 = np.array(history[-14:] if len(history) >= 14 else history, dtype=float)
@@ -146,9 +147,13 @@ def _recursive_feature_row(
     month = int(target_date.month)
     weekend = int(dow >= 5)
     category = str(latest["category"])
-    future_promo = int(weekend and category in {"Grocery", "Beverages", "Apparel"} and target_date.day % 3 == 0)
-    discount = 0.12 if future_promo else 0.0
-    price = max(0.99, float(latest["price"]) * (1 - discount))
+    promo_rate = float(recent["promotion_flag"].mean())
+    promo_gap = int(round(1 / promo_rate)) if promo_rate > 0 else 0
+    future_promo = int(promo_gap >= 7 and target_date.dayofyear % promo_gap == 0)
+    promo_discount = float(recent.loc[recent["promotion_flag"] == 1, "discount"].mean()) if bool((recent["promotion_flag"] == 1).any()) else 0.16
+    discount = round(promo_discount if future_promo else 0.0, 2)
+    base_price = float(recent["price"].median())
+    price = max(0.99, base_price * (1 - discount))
     inventory_projection = max(0.0, float(latest["inventory_level"]) - float(np.sum(history[-7:]) if history else 0) * 0.1)
     return {
         "lag_1": lag(1),
@@ -170,6 +175,19 @@ def _recursive_feature_row(
         "category_encoded": int(mappings.get("category", {}).get(category, -1)),
         "inventory_level": inventory_projection,
     }
+
+
+def _seasonal_prediction(group: pd.DataFrame, history: list[float], target_date: pd.Timestamp) -> float:
+    recent = group.tail(180)
+    dow = int(target_date.dayofweek)
+    same_dow = recent[recent["day_of_week"] == dow].tail(8)["units_sold"].astype(float)
+    dow_mean = float(same_dow.mean()) if len(same_dow) >= 3 else float(recent["units_sold"].tail(28).mean())
+    short_level = float(np.mean(history[-14:] if len(history) >= 14 else history))
+    long_level = float(recent["units_sold"].tail(90).mean())
+    trend = 0.0
+    if len(history) >= 28:
+        trend = float(np.mean(history[-7:]) - np.mean(history[-28:-21]))
+    return max(0.0, 0.55 * dow_mean + 0.35 * short_level + 0.10 * long_level + 0.08 * trend)
 
 
 def _recursive_backtest(
@@ -194,8 +212,8 @@ def _recursive_backtest(
         for step, actual in enumerate(val_group.itertuples(index=False), start=1):
             row = _recursive_feature_row(train_group, history, pd.Timestamp(actual.date), mappings)
             model_prediction = max(0.0, float(model.predict(pd.DataFrame([row], columns=feature_columns))[0]))
-            rolling_prediction = float(np.mean(history[-14:] if len(history) >= 14 else history))
-            prediction = FORECAST_BLEND_WEIGHT * model_prediction + (1 - FORECAST_BLEND_WEIGHT) * rolling_prediction
+            seasonal_prediction = _seasonal_prediction(train_group, history, pd.Timestamp(actual.date))
+            prediction = FORECAST_BLEND_WEIGHT * model_prediction + (1 - FORECAST_BLEND_WEIGHT) * seasonal_prediction
             history.append(prediction)
             rows.append(
                 {

@@ -131,7 +131,7 @@ def forecast_chart(historical: list[dict], forecast: list[dict], anomalies: list
         title=dict(text=f"Historical Daily Sales and {horizon_days}-Day Daily Forecast", x=0.01, xanchor="left", font=dict(size=20)),
     )
     fig.update_xaxes(range=[visible_start, visible_end], nticks=8, tickformat="%b %Y")
-    fig.update_yaxes(title="Units sold")
+    fig.update_yaxes(title="Daily units sold")
     return _polish_axes(fig)
 
 
