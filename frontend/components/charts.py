@@ -67,7 +67,7 @@ def forecast_chart(historical: list[dict], forecast: list[dict], anomalies: list
             x=band_x,
             y=band_y,
             mode="lines",
-            name="Estimated range",
+            name="Typical range",
             line=dict(width=0),
             fill="toself",
             fillcolor="rgba(14, 165, 233, .18)",
@@ -79,7 +79,7 @@ def forecast_chart(historical: list[dict], forecast: list[dict], anomalies: list
             x=fcst["date"],
             y=fcst["predicted_units"],
             mode="lines+markers",
-            name="Daily forecast",
+            name="Expected daily forecast",
             line=dict(color="#047857", width=4, shape="spline"),
             marker=dict(size=6, color="#10b981", line=dict(color="#064e3b", width=1)),
             hovertemplate="%{x|%b %d, %Y}<br>Forecast: %{y:.1f} units<extra></extra>",
@@ -128,7 +128,7 @@ def forecast_chart(historical: list[dict], forecast: list[dict], anomalies: list
         margin=dict(l=78, r=28, t=58, b=48),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="right", x=1, font=dict(size=13)),
-        title=dict(text=f"Historical Daily Sales and {horizon_days}-Day Daily Forecast", x=0.01, xanchor="left", font=dict(size=20)),
+        title=dict(text=f"Historical Daily Sales and {horizon_days}-Day Expected Forecast", x=0.01, xanchor="left", font=dict(size=20)),
     )
     fig.update_xaxes(range=[visible_start, visible_end], nticks=8, tickformat="%b %Y")
     fig.update_yaxes(title="Daily units sold")

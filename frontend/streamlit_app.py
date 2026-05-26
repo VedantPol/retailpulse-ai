@@ -108,7 +108,7 @@ with tabs[0]:
         metric_card("Inventory", f"{summary['current_inventory']:,}", "Units on hand")
     with c5:
         metric_card("Reorder", f"{summary['recommended_reorder_quantity']:,}", "Suggested units")
-    section_title("Demand Pulse", f"Historical daily sales, {horizon_days}-day daily forecast, estimated range, and detected anomalies in one view.")
+    section_title("Demand Pulse", f"Historical daily sales, {horizon_days}-day expected forecast, typical range, and detected anomalies in one view.")
     with st.container(border=True):
         st.plotly_chart(
             forecast_chart(forecast_data["historical"], forecast_data["forecast"], anomaly_data["anomalies"]),

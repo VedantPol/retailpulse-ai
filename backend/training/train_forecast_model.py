@@ -34,7 +34,7 @@ FEATURE_COLUMNS = [
     "inventory_level",
 ]
 
-FORECAST_BLEND_WEIGHT = 0.45
+FORECAST_BLEND_WEIGHT = 0.35
 
 
 def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
@@ -174,17 +174,41 @@ def _recursive_feature_row(
     }
 
 
-def _seasonal_prediction(group: pd.DataFrame, history: list[float], target_date: pd.Timestamp) -> float:
+def _winsorized(values: pd.Series | np.ndarray, quantile: float = 0.92) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    if len(array) == 0:
+        return array
+    return np.clip(array, 0, np.quantile(array, quantile))
+
+
+def _profile_prediction(group: pd.DataFrame, target_date: pd.Timestamp, horizon_step: int) -> float:
     recent = group.tail(180)
+    units = recent["units_sold"].astype(float)
+    winsorized_units = _winsorized(units, 0.92)
+    recent_30 = _winsorized(recent.tail(30)["units_sold"], 0.90)
+    recent_90 = _winsorized(recent.tail(90)["units_sold"], 0.92)
+    level = 0.55 * float(np.mean(recent_30)) + 0.30 * float(np.mean(recent_90)) + 0.15 * float(np.mean(winsorized_units))
+
+    previous_window = recent.iloc[-90:-30]["units_sold"] if len(recent) >= 90 else recent["units_sold"]
+    previous = _winsorized(previous_window, 0.92)
+    trend = (float(np.mean(recent_30)) - float(np.mean(previous))) / 60 if len(previous) else 0.0
+    trend = float(np.clip(trend, -0.035 * max(level, 1.0), 0.035 * max(level, 1.0)))
+
     dow = int(target_date.dayofweek)
-    same_dow = recent[recent["day_of_week"] == dow].tail(8)["units_sold"].astype(float)
-    dow_mean = float(same_dow.mean()) if len(same_dow) >= 3 else float(recent["units_sold"].tail(28).mean())
-    short_level = float(np.mean(history[-14:] if len(history) >= 14 else history))
-    long_level = float(recent["units_sold"].tail(90).mean())
-    trend = 0.0
-    if len(history) >= 28:
-        trend = float(np.mean(history[-7:]) - np.mean(history[-28:-21]))
-    return max(0.0, 0.55 * dow_mean + 0.35 * short_level + 0.10 * long_level + 0.08 * trend)
+    overall = max(float(np.mean(winsorized_units)), 0.1)
+    same_dow = _winsorized(recent[recent["day_of_week"] == dow].tail(10)["units_sold"], 0.90)
+    dow_mean = float(np.mean(same_dow)) if len(same_dow) >= 3 else overall
+    weekday_factor = float(np.clip(1 + 0.45 * (dow_mean / overall - 1), 0.88, 1.14))
+
+    recent_promo_rate = float(0.65 * recent.tail(60)["promotion_flag"].mean() + 0.35 * recent["promotion_flag"].mean())
+    non_promo = recent[recent["promotion_flag"] == 0]["units_sold"].astype(float)
+    promo = recent[recent["promotion_flag"] == 1]["units_sold"].astype(float)
+    non_promo_mean = float(np.mean(_winsorized(non_promo, 0.92))) if len(non_promo) else overall
+    promo_mean = float(np.mean(_winsorized(promo, 0.85))) if len(promo) >= 3 else non_promo_mean
+    promo_lift = float(np.clip(promo_mean / max(non_promo_mean, 0.1) - 1, 0, 0.7))
+    expected_promo_multiplier = 1 + min(recent_promo_rate, 0.25) * promo_lift
+
+    return max(0.1, (level + trend * horizon_step) * weekday_factor * expected_promo_multiplier)
 
 
 def _recursive_backtest(
@@ -209,8 +233,8 @@ def _recursive_backtest(
         for step, actual in enumerate(val_group.itertuples(index=False), start=1):
             row = _recursive_feature_row(train_group, history, pd.Timestamp(actual.date), mappings)
             model_prediction = max(0.0, float(model.predict(pd.DataFrame([row], columns=feature_columns))[0]))
-            seasonal_prediction = _seasonal_prediction(train_group, history, pd.Timestamp(actual.date))
-            prediction = FORECAST_BLEND_WEIGHT * model_prediction + (1 - FORECAST_BLEND_WEIGHT) * seasonal_prediction
+            profile_prediction = _profile_prediction(train_group, pd.Timestamp(actual.date), step)
+            prediction = FORECAST_BLEND_WEIGHT * model_prediction + (1 - FORECAST_BLEND_WEIGHT) * profile_prediction
             history.append(prediction)
             rows.append(
                 {
